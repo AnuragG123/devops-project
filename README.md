@@ -1,24 +1,34 @@
-To delete a database in AWS Glue using a Boto3 script, you can use the `boto3` library in Python. Here's a basic example of how you can achieve this:
+To add the region `us-west-2` to the boto3 client initialization, you can modify the code like this:
 
 ```python
 import boto3
 
-# Initialize Glue client
-glue_client = boto3.client('glue')
+def lambda_handler(event, context):
+    database_name = "your_database_name"
+    result = delete_glue_database(database_name)
+    return {
+        'statusCode': 200 if result else 500,
+        'body': "Database deleted successfully" if result else "Failed to delete database"
+    }
 
-# Specify the name of the database you want to delete
-database_name = 'your_database_name'
-
-try:
-    # Delete the specified database
-    response = glue_client.delete_database(
-        Name=database_name
-    )
-    print(f"Database '{database_name}' deleted successfully.")
-except glue_client.exceptions.EntityNotFoundException:
-    print(f"Database '{database_name}' not found.")
-except Exception as e:
-    print(f"An error occurred: {str(e)}")
+def delete_glue_database(database_name):
+    try:
+        # Initialize Glue client with region specified
+        glue_client = boto3.client('glue', region_name='us-west-2')
+        
+        # Delete the database
+        response = glue_client.delete_database(Name=database_name)
+        
+        # Check if the operation was successful
+        if response['ResponseMetadata']['HTTPStatusCode'] == 200:
+            print(f"Database '{database_name}' deleted successfully.")
+            return True
+        else:
+            print(f"Failed to delete database '{database_name}'.")
+            return False
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return False
 ```
 
-Replace `'your_database_name'` with the name of the database you want to delete. Make sure you have the necessary permissions to delete databases in AWS Glue. This script will catch exceptions if the database does not exist or if there are any other errors during the deletion process.
+This will ensure that the boto3 client operates in the `us-west-2` region.
