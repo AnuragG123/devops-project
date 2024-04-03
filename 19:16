@@ -1,0 +1,80 @@
+import boto3
+from datetime import datetime, timedelta
+
+def delete_objects_in_folder(bucket_name, prefix):
+    s3 = boto3.client('s3')
+    deleted_objects = []
+
+    # List objects in the folder
+    response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
+
+    # Iterate through objects and delete them
+    if 'Contents' in response:
+        for obj in response['Contents']:
+            key = obj['Key']
+            print(f"Deleting object: {key}")
+            s3.delete_object(Bucket=bucket_name, Key=key)
+            deleted_objects.append(key)
+
+    return deleted_objects
+
+def delete_folders(bucket_name, prefix, older_than_years):
+    s3 = boto3.client('s3')
+    deleted_folders = []
+
+    # Calculate cutoff date
+    cutoff_date = datetime.now() - timedelta(days=older_than_years*365)
+
+    # List objects in the bucket with the given prefix
+    response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix, Delimiter='/')
+
+    # Iterate through folders and delete them if older than cutoff date
+    if 'CommonPrefixes' in response:
+        for folder in response['CommonPrefixes']:
+            folder_name = folder['Prefix']
+            parts = folder_name.split('/')
+            if len(parts) >= 5:
+                folder_year_month = parts[-1].strip()  # Extract YR_MO from the folder path
+                try:
+                    folder_date = datetime.strptime(folder_year_month, "%Y_%m")
+                    if folder_date < cutoff_date:
+                        print(f"Deleting folder: {folder_name}")
+                        # Delete objects in the folder
+                        deleted_objects = delete_objects_in_folder(bucket_name, folder_name)
+                        # Delete the folder itself if it's empty after deleting objects
+                        if not deleted_objects:
+                            s3.delete_object(Bucket=bucket_name, Key=folder_name)
+                        deleted_folders.append(folder_name)
+                except ValueError:
+                    # Skip if folder_year_month is not a valid date
+                    pass
+
+    return deleted_folders
+
+def lambda_handler(event, context):
+    bucket_name = event['bucket']
+    prefix = event['prefix']
+    older_than_years = event.get('older_than_years', 8)
+
+    deleted_folders = delete_folders(bucket_name, prefix, older_than_years)
+
+    return {
+        "deleted_folders": deleted_folders
+    }
+
+# Example usage
+if __name__ == "__main__":
+    # For local testing
+    event = {
+        "bucket": "anuragwarangal",
+        "prefix": "converted/loss/on533/region_number*/",
+        "older_than_years": 8
+    }
+    response = lambda_handler(event, None)
+    deleted_folders = response.get('deleted_folders', [])
+    if deleted_folders:
+        print("Deleted folders:")
+        for folder in deleted_folders:
+            print(folder)
+    else:
+        print("No folders deleted.")
