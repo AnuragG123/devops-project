@@ -1,4 +1,4 @@
-Got it. Let's adjust the Lambda function to include the `RPT_DT` folders under `converted/premium/onfip/` in `rameshbucket`. Here's the updated code:
+To integrate email notifications into your Lambda function for sending alerts when folders are deleted, you'll need to use the AWS SES (Simple Email Service) to send emails. Here's how you can modify your Lambda function to include email notifications:
 
 ```python
 import boto3
@@ -8,6 +8,7 @@ import logging
 
 # Initialize boto3 clients
 s3_client = boto3.client('s3')
+ses_client = boto3.client('ses')
 
 # Define constants
 BUCKET_NAMES = ['anuragwarangal', 'rameshbucket']
@@ -69,6 +70,8 @@ def get_folders_to_delete(bucket_name, prefix, date_pattern, date_format):
                                 if (datetime.now() - folder_date).days > 8 * 365:  # Older than 8 years
                                     logger.info(f"Folder {sub_sub_prefix} is older than 8 years and will be deleted")
                                     folders_to_delete.add(sub_sub_prefix)
+                            else:
+                                logger.info(f"No date match found in sub-sub-prefix: {sub_sub_prefix}")
                     else:
                         logger.info(f"No sub-sub-prefixes found in sub-prefix: {sub_prefix}")
         else:
@@ -85,6 +88,41 @@ def delete_folders(bucket_name, folders):
                 s3_client.delete_object(Bucket=bucket_name, Key=obj['Key'])
         logger.info(f"Deleting folder: {folder}")
         s3_client.delete_object(Bucket=bucket_name, Key=folder)
+    
+    # Send email notification
+    send_email_notification(folders)
+
+def send_email_notification(folders_deleted):
+    subject = f"S3 Folder Deletion Notification"
+    body = f"The following folders were deleted:\n\n"
+    for folder in folders_deleted:
+        body += f"{folder}\n"
+    
+    try:
+        response = ses_client.send_email(
+            Destination={
+                'ToAddresses': [
+                    'anurag09@gmail.com',
+                    'rahul11@gmail.com'
+                ]
+            },
+            Message={
+                'Body': {
+                    'Text': {
+                        'Charset': 'UTF-8',
+                        'Data': body,
+                    },
+                },
+                'Subject': {
+                    'Charset': 'UTF-8',
+                    'Data': subject,
+                },
+            },
+            Source='your_verified_email@example.com'  # Replace with your verified SES email
+        )
+        logger.info("Email notification sent")
+    except Exception as e:
+        logger.error(f"Failed to send email notification: {str(e)}")
 
 def lambda_handler(event, context):
     logger.info("Lambda function started")
@@ -122,4 +160,10 @@ def lambda_handler(event, context):
     }
 ```
 
-This code now correctly includes handling `RPT_DT` folders under `converted/premium/onfip/` in the `rameshbucket`, alongside other specified paths and criteria. It consolidates the logic to manage folders older than 8 years across all specified paths within the `anuragwarangal` and `rameshbucket` S3 buckets.
+### Explanation:
+1. **Integration with SES**: Added `boto3.client('ses')` to initialize the SES client for sending emails.
+2. **Email Notification Functionality**: Introduced `send_email_notification()` function to construct and send email notifications to specified recipients (`anurag09@gmail.com` and `rahul11@gmail.com`) after folders are deleted.
+3. **SES Configuration**: Replace `'your_verified_email@example.com'` with your verified email address in AWS SES console. SES requires email addresses to be verified before you can send emails from them.
+4. **Usage in `delete_folders()`**: Modified `delete_folders()` function to call `send_email_notification()` after deleting folders to notify recipients.
+
+Ensure that your Lambda function has the necessary IAM permissions to interact with S3 (read and delete objects) and SES (send email). Also, make sure your SES account is properly configured with the necessary permissions and verified email addresses. Adjust the SES configuration and email content as per your specific requirements.
