@@ -1,222 +1,266 @@
-To create an API Gateway for the given Lambda function in Terraform, you need to set up the necessary AWS resources, including the API Gateway, Lambda function, IAM role, and necessary permissions. Here’s a complete example of how to achieve this:
+To extend your Lambda function to send emails using Amazon SES when folders are deleted, you'll need to perform the following steps:
 
-1. **Define the IAM role for the Lambda function**: This role grants the Lambda function permission to access S3 and other AWS resources.
+1. Configure SES for sending emails.
+2. Update your Lambda function to use SES.
+3. Add necessary IAM permissions to allow Lambda to send emails via SES.
 
-2. **Create the Lambda function**: Define the Lambda function that you have provided.
+### Step 1: Configure SES for Sending Emails
 
-3. **Create the API Gateway**: Define the API Gateway that will invoke the Lambda function.
+Make sure your email addresses are verified in SES (Amazon SES requires email addresses to be verified for sending and receiving emails).
 
-4. **Set up the necessary permissions**: Allow API Gateway to invoke the Lambda function.
+### Step 2: Update Lambda Function to Use SES
 
-Here is the Terraform code to accomplish this:
+Update your Lambda function to send emails using SES.
 
-### 1. Define the IAM Role for Lambda
+```python
+import boto3
+from datetime import datetime, timedelta
+import re
+import logging
+import os
 
-```hcl
-provider "aws" {
-  region = "us-east-1"
-}
+# Initialize boto3 clients
+s3_client = boto3.client('s3')
+ses_client = boto3.client('ses')
 
-resource "aws_iam_role" "lambda_role" {
-  name = "lambda_s3_role"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [{
-      Action = "sts:AssumeRole",
-      Effect = "Allow",
-      Principal = {
-        Service = "lambda.amazonaws.com"
-      }
-    }]
-  })
+# Define constants
+BUCKET_NAMES = ['anuragwarangal', 'rameshbuckethm']
+SES_SENDER_EMAIL = os.environ['SES_SENDER_EMAIL']
+SES_RECIPIENT_EMAILS = os.environ['SES_RECIPIENT_EMAILS'].split(',')
 
-  inline_policy {
-    name   = "lambda_s3_policy"
-    policy = jsonencode({
-      Version = "2012-10-17",
-      Statement = [
-        {
-          Action = [
-            "s3:ListBucket",
-            "s3:GetObject",
-            "s3:DeleteObject"
-          ],
-          Effect   = "Allow",
-          Resource = "*"
+# Define suffixes for office, offc, and region_number
+OFFICE_SUFFIXES = [str(i).zfill(2) for i in range(1, 29)]  # 01 to 28
+OFFC_SUFFIXES = [str(i).zfill(2) for i in range(1, 29)]  # 01 to 28
+REGION_SUFFIXES = [str(i).zfill(2) for i in range(1, 29)]  # 01 to 28
+
+# Set up logging
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+def get_folders_to_delete(bucket_name, prefix, date_pattern, date_format):
+    folders_to_delete = set()
+    suffixes = OFFICE_SUFFIXES if 'OFFICE=' in prefix else OFFC_SUFFIXES if 'OFFC=' in prefix else REGION_SUFFIXES
+    for suffix in suffixes:
+        full_prefix = f"{prefix}{suffix}/"
+        logger.info(f"Listing objects in bucket {bucket_name} with prefix {full_prefix}")
+        response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=full_prefix, Delimiter='/')
+        if 'CommonPrefixes' in response:
+            for common_prefix in response['CommonPrefixes']:
+                sub_prefix = common_prefix['Prefix']
+                logger.info(f"Checking sub-prefix: {sub_prefix}")
+                match = re.search(date_pattern, sub_prefix)
+                if match:
+                    date_str = match.group(1)
+                    try:
+                        if date_format == '%Y%m':  # For YR_MO
+                            year = date_str[:4]
+                            month = date_str[4:6]
+                            folder_date = datetime(int(year), int(month), 1)
+                        elif date_format == '%Y%m%d':  # For RPT_DT and FILE_DATE
+                            year = date_str[:4]
+                            month = date_str[4:6]
+                            day = date_str[6:8]
+                            folder_date = datetime(int(year), int(month), int(day))
+                        logger.info(f"Found folder date: {folder_date}")
+                        if (datetime.now() - folder_date).days > 8 * 365:  # Older than 8 years
+                            logger.info(f"Folder {sub_prefix} is older than 8 years and will be deleted")
+                            folders_to_delete.add(sub_prefix)
+                    except ValueError:
+                        logger.warning(f"Ignoring invalid date format in folder: {sub_prefix}")
+    return list(folders_to_delete)
+
+def delete_folders(bucket_name, folders):
+    for folder in folders:
+        logger.info(f"Deleting contents of folder: {folder}")
+        response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix=folder)
+        if 'Contents' in response:
+            for obj in response['Contents']:
+                logger.info(f"Deleting object: {obj['Key']}")
+                s3_client.delete_object(Bucket=bucket_name, Key=obj['Key'])
+        logger.info(f"Deleting folder: {folder}")
+        s3_client.delete_object(Bucket=bucket_name, Key=folder)
+
+def send_email(folders_deleted):
+    subject = "S3 Folder Deletion Notification"
+    body_text = f"The following folders were deleted:\n" + "\n".join(folders_deleted)
+    body_html = f"<html><body><h3>S3 Folder Deletion Notification</h3><p>The following folders were deleted:</p><ul>" + \
+                "".join(f"<li>{folder}</li>" for folder in folders_deleted) + "</ul></body></html>"
+
+    response = ses_client.send_email(
+        Source=SES_SENDER_EMAIL,
+        Destination={
+            'ToAddresses': SES_RECIPIENT_EMAILS
         },
-        {
-          Action = [
-            "logs:CreateLogGroup",
-            "logs:CreateLogStream",
-            "logs:PutLogEvents"
-          ],
-          Effect   = "Allow",
-          Resource = "arn:aws:logs:*:*:*"
+        Message={
+            'Subject': {
+                'Data': subject
+            },
+            'Body': {
+                'Text': {
+                    'Data': body_text
+                },
+                'Html': {
+                    'Data': body_html
+                }
+            }
         }
-      ]
-    })
-  }
+    )
+
+    logger.info(f"Email sent! Message ID: {response['MessageId']}")
+
+def lambda_handler(event, context):
+    logger.info("Lambda function started")
+
+    # Define patterns and formats for each bucket
+    patterns_formats = {
+        'anuragwarangal': [
+            (r'YR_MO=(\d{6})/', '%Y%m'),     # For YR_MO folders in on533 and onomc
+            (r'RPT_DT=(\d{8})/', '%Y%m%d')   # For RPT_DT folders in oneko and onfpm
+        ],
+        'rameshbuckethm': [
+            (r'YR_MO=(\d{6})/', '%Y%m'),     # For YR_MO folders in oness and onest
+            (r'RPT_DT=(\d{8})/', '%Y%m%d'),  # For RPT_DT folders in onfip
+            (r'FILE_DATE=(\d{8})/', '%Y%m%d')  # For FILE_DATE folders in onfld
+        ]
+    }
+
+    # Combine all folders to delete
+    folders_to_delete = []
+    
+    for bucket_name in BUCKET_NAMES:
+        if bucket_name == 'anuragwarangal':
+            paths = {
+                'converted/loss/on533/region_number=': [
+                    (r'YR_MO=(\d{6})/', '%Y%m')
+                ],
+                'converted/loss/onomc/OFFC=': [
+                    (r'YR_MO=(\d{6})/', '%Y%m')
+                ],
+                'converted/premium/oneko/OFFC=': [
+                    (r'RPT_DT=(\d{8})/', '%Y%m%d')
+                ],
+                'converted/premium/onfpm/OFFC=': [
+                    (r'RPT_DT=(\d{8})/', '%Y%m%d')
+                ]
+            }
+        elif bucket_name == 'rameshbuckethm':
+            paths = {
+                'converted/loss/oness/OFFICE=': [
+                    (r'YR_MO=(\d{6})/', '%Y%m')
+                ],
+                'converted/loss/onest/OFFICE=': [
+                    (r'YR_MO=(\d{6})/', '%Y%m')
+                ],
+                'converted/premium/onfip/RPT_DT=': [
+                    (r'RPT_DT=(\d{8})/', '%Y%m%d')
+                ],
+                'converted/premium/onfld/OFFICE=': [
+                    (r'FILE_DATE=(\d{8})/', '%Y%m%d')
+                ]
+            }
+        
+        for prefix, patterns in paths.items():
+            for pattern, date_format in patterns_formats[bucket_name]:
+                folders_to_delete += get_folders_to_delete(bucket_name, prefix, pattern, date_format)
+
+    if folders_to_delete:
+        for bucket_name in BUCKET_NAMES:
+            delete_folders(bucket_name, folders_to_delete)
+            logger.info(f"Deleted folders in {bucket_name}: {folders_to_delete}")
+        send_email(folders_to_delete)
+    else:
+        logger.info("No folders to delete")
+
+    return {
+        'statusCode': 200,
+        'body': 'Lambda function executed successfully.'
+    }
+```
+
+### Step 3: Update Terraform Configuration
+
+Update your Terraform configuration to include the necessary environment variables and IAM policy for SES.
+
+#### `variables.tf`
+
+Add new variables for SES.
+
+```hcl
+variable "ses_sender_email" {
+  description = "The email address to send notifications from"
+  type        = string
+  default     = "your-sender-email@example.com"
+}
+
+variable "ses_recipient_emails" {
+  description = "A comma-separated list of email addresses to send notifications to"
+  type        = string
+  default     = "anurag@gmail.com,rahul@gmail.com"
 }
 ```
 
-### 2. Create the Lambda Function
+#### `main.tf`
 
-Save your Lambda function code in a `lambda_function.zip` file.
-
-```hcl
-resource "aws_lambda_function" "s3_cleanup" {
-  filename         = "lambda_function.zip"
-  function_name    = "s3_cleanup_function"
-  role             = aws_iam_role.lambda_role.arn
-  handler          = "index.lambda_handler"
-  runtime          = "python3.8"
-
-  source_code_hash = filebase64sha256("lambda_function.zip")
-}
-```
-
-### 3. Create the API Gateway
+Update the environment variables for your Lambda function and add the IAM policy for SES.
 
 ```hcl
-resource "aws_apigatewayv2_api" "lambda_api" {
-  name          = "lambda-api"
-  protocol_type = "HTTP"
-}
+# Add SES permissions to the Lambda policy
+resource "aws_iam_policy" "lambda_policy" {
+  name        = "lambda-policy"
+  description = "Policy for Lambda function"
 
-resource "aws_apigatewayv2_integration" "lambda_integration" {
-  api_id             = aws_apigatewayv2_api.lambda_api.id
-  integration_type   = "AWS_PROXY"
-  integration_uri    = aws_lambda_function.s3_cleanup.invoke_arn
-  integration_method = "POST"
-}
-```
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Resource = "*"
+      },
+      {
+        Effect   = "Allow"
+        Action   = [
+          "s3:ListBucket",
+          "s3:GetObject",
+          "s3:DeleteObject"
+        ]
+        Resource = "*" 
 
-### 4. Set up API Gateway Routes and Permissions
-
-```hcl
-resource "aws_apigatewayv2_route" "lambda_route" {
-  api_id    = aws_apigatewayv2_api.lambda_api.id
-  route_key = "ANY /{proxy+}"
-
-  target = "integrations/${aws_apigatewayv2_integration.lambda_integration.id}"
-}
-
-resource "aws_apigatewayv2_stage" "lambda_stage" {
-  api_id      = aws_apigatewayv2_api.lambda_api.id
-  name        = "$default"
-  auto_deploy = true
-}
-
-resource "aws_lambda_permission" "apigw_lambda" {
-  statement_id  = "AllowAPIGatewayInvoke"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.s3_cleanup.function_name
-  principal     = "apigateway.amazonaws.com"
-  source_arn    = "${aws_apigatewayv2_api.lambda_api.execution_arn}/*/*"
-}
-```
-
-### Complete Terraform Configuration
-
-```hcl
-provider "aws" {
-  region = "us-east-1"
-}
-
-resource "aws_iam_role" "lambda_role" {
-  name = "lambda_s3_role"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17",
-    Statement = [{
-      Action = "sts:AssumeRole",
-      Effect = "Allow",
-      Principal = {
-        Service = "lambda.amazonaws.com"
+ # Replace with your specific S3 bucket ARNs if needed
+      },
+      {
+        Effect   = "Allow"
+        Action   = "ses:SendEmail"
+        Resource = "*"
       }
-    }]
+    ]
   })
-
-  inline_policy {
-    name   = "lambda_s3_policy"
-    policy = jsonencode({
-      Version = "2012-10-17",
-      Statement = [
-        {
-          Action = [
-            "s3:ListBucket",
-            "s3:GetObject",
-            "s3:DeleteObject"
-          ],
-          Effect   = "Allow",
-          Resource = "*"
-        },
-        {
-          Action = [
-            "logs:CreateLogGroup",
-            "logs:CreateLogStream",
-            "logs:PutLogEvents"
-          ],
-          Effect   = "Allow",
-          Resource = "arn:aws:logs:*:*:*"
-        }
-      ]
-    })
-  }
 }
 
+# Update Lambda environment variables
 resource "aws_lambda_function" "s3_cleanup" {
-  filename         = "lambda_function.zip"
-  function_name    = "s3_cleanup_function"
-  role             = aws_iam_role.lambda_role.arn
-  handler          = "index.lambda_handler"
-  runtime          = "python3.8"
-  source_code_hash = filebase64sha256("lambda_function.zip")
-}
-
-resource "aws_apigatewayv2_api" "lambda_api" {
-  name          = "lambda-api"
-  protocol_type = "HTTP"
-}
-
-resource "aws_apigatewayv2_integration" "lambda_integration" {
-  api_id             = aws_apigatewayv2_api.lambda_api.id
-  integration_type   = "AWS_PROXY"
-  integration_uri    = aws_lambda_function.s3_cleanup.invoke_arn
-  integration_method = "POST"
-}
-
-resource "aws_apigatewayv2_route" "lambda_route" {
-  api_id    = aws_apigatewayv2_api.lambda_api.id
-  route_key = "ANY /{proxy+}"
-  target    = "integrations/${aws_apigatewayv2_integration.lambda_integration.id}"
-}
-
-resource "aws_apigatewayv2_stage" "lambda_stage" {
-  api_id      = aws_apigatewayv2_api.lambda_api.id
-  name        = "$default"
-  auto_deploy = true
-}
-
-resource "aws_lambda_permission" "apigw_lambda" {
-  statement_id  = "AllowAPIGatewayInvoke"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.s3_cleanup.function_name
-  principal     = "apigateway.amazonaws.com"
-  source_arn    = "${aws_apigatewayv2_api.lambda_api.execution_arn}/*/*"
+  ...
+  environment {
+    variables = {
+      SES_SENDER_EMAIL      = var.ses_sender_email
+      SES_RECIPIENT_EMAILS  = var.ses_recipient_emails
+    }
+  }
+  ...
 }
 ```
 
-### Instructions
+### Apply Terraform Configuration
 
-1. Save the above Terraform configuration in a file, e.g., `main.tf`.
+Initialize and apply the Terraform configuration.
 
-2. Create a `lambda_function.zip` file containing your Lambda function code.
-
-3. Initialize Terraform and apply the configuration:
-
-```sh
+```bash
 terraform init
 terraform apply
 ```
 
-This will create the necessary IAM roles, Lambda function, API Gateway, and set up permissions. Once applied, you will have an API Gateway endpoint that triggers your Lambda function when accessed.
+This setup will ensure that your Lambda function can send emails using SES when folders are deleted. Make sure to replace placeholder values like `"your-sender-email@example.com"` with actual email addresses and adjust policies as necessary.
